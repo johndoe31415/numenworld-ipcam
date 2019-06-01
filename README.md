@@ -5,7 +5,7 @@ included and sold as a "2.0MP network IP cam 1080P HD Built-in microphone CCTV
 Video surveillance dome security IP camera ONVIF day/night indoor webcams". It
 seems to support ONVIF and, allegedly, has a full HD sensor capable of
 producing 1080p. The official website that is listed on the camera is
-[http://www.XMeye.net](www.XMeye.net). On the stricker it says "Product Name:
+[www.XMeye.net](http://www.XMeye.net). On the stricker it says "Product Name:
 NCV-I536A Audio", specifies a length of 3.6mm (I'm guessing focal length of the
 lens?), it also says H.265+ and that it takes 12V DC power at 2A. My camera was
 produced in May of 2019. This project documents my playing around with this
