@@ -74,6 +74,315 @@ works, still poking around a bit.
 No idea what runs on ports 8000 or 9530. But another web server seems to run on
 port 8899 that seems to expect SOAP.
 
+## Cloud Communication
+The camera is, by default, trying to connect to some kind of cloud service. It
+sends various UDP telegrams and TCP connections out. I am *very* suspicious of
+this communication and think there's a very good possibility that a specific
+reply to one of these datagrams enables either remote firmware download or
+complete remote control (i.e., using TCP for NAT traversal). It is my
+professional opinion as a security researcher that I *strongly* advise to block
+all of this activity in your firewall, via effective means (e.g., VLAN jailing
+and filtering since we cannot assume the device will reliably use its assigned
+MAC or IP address).
+
+In any case, the camera uses two public DNS servers that are entirely
+independent of your local setup, 114.114.114.114 (AKA public1.114dns.com, a
+Chinese DNS provider) and 8.8.8.8 (AKA google-public-dns-a.google.com, Google's
+public DNS).
+
+It then resolves pub-cfg.secu100.net and mac.secu100.net. Fun fact: The DNS
+response that the Chinese webserver gives is a different IP than the one that Western
+ones give:
+
+```
+$ host mac.secu100.net
+mac.secu100.net has address 35.158.174.16
+$ host 35.158.174.16
+16.174.158.35.in-addr.arpa domain name pointer ec2-35-158-174-16.eu-central-1.compute.amazonaws.com.
+
+
+$ host mac.secu100.net 8.8.8.8
+Using domain server:
+Name: 8.8.8.8
+Address: 8.8.8.8#53
+Aliases: 
+
+mac.secu100.net has address 35.158.174.16
+
+$ host mac.secu100.net 114.114.114.114
+Using domain server:
+Name: 114.114.114.114
+Address: 114.114.114.114#53
+Aliases: 
+
+mac.secu100.net has address 54.254.159.106
+$ host 54.254.159.106
+106.159.254.54.in-addr.arpa domain name pointer ec2-54-254-159-106.ap-southeast-1.compute.amazonaws.com.
+```
+
+I.e., it seems to connect to an APAC AWS instance instead of a European one.
+The most benign reason for this would be automatic geolocation to determine the
+fastest server in proximity of the resolver, but more malicious explanations
+are thinkable as well and are left up to the reader.
+
+After DNS resolution, it does a TCP connect to the first domain
+(pub-cfg.secu100.net) on port 8086 and performs a HTTP POST request (message
+body and response body was formatted by me for better readability):
+
+```
+POST / HTTP/1.1
+CSeq: 1
+Host: 54.193.123.32
+Content-Length: 303
+
+{
+    "CfgProtocol": {
+        "Body": {
+            "AuthCode": "REDACTED",
+            "OemID": "General",
+            "OtherInfo": "V5.00.R02.00030678.10010.246701.00200",
+            "ProductID": "XM530_80X20_8M",
+            "SerialNumber": "REDACTED"
+        },
+        "Header": {
+            "CSeq": "1",
+            "MessageType": "MSG_DSS_CFG_QUERY_REQ",
+            "Version": "1.0"
+        }
+    }
+}
+HTTP/1.1 200 OK
+Server: openresty/1.9.3.1
+Date: Sat, 01 Jun 2019 14:23:32 GMT
+Content-Type: text/html
+Connection: keep-alive
+content-length: 338
+
+{
+    "CfgProtocol": {
+        "Body": {
+            "Area": "Europe:Germany:Default",
+            "AuthCodeReTry": "1800",
+            "ErrReTry": "60",
+            "MainStreamEnable": "1",
+            "MainStreamMaxFps": "6",
+            "RewriteOemDomainName": "52.58.71.125",
+            "SnapInterval": "3",
+            "SnapPicture": "1"
+        },
+        "Header": {
+            "CSeq": "1",
+            "ErrorNum": "200",
+            "ErrorString": "Success OK",
+            "MessageType": "MSG_DSS_CFG_QUERY_RSP",
+            "Version": "1.0"
+        }
+    }
+}
+```
+
+Interestingly, the "AuthCode" and "SerialNumber" are indeed the indentical 8
+bytes (Base16 formatted). It also appears as if the cloud communication could
+remotely tell the camera to only support a maximum frame rate. Possibly it can
+therefore be remotely "unlocked" at giving a greater framerate by simply
+impersonating that configuration webserver. Since it doesn't use any kind of
+security/authentication, this should be exceptionally easy to try.
+
+Then it connects to the second server and transmits this:
+
+```
+POST / HTTP/1.1
+Host:access-dss.secu100.net
+Connection: keep-alive
+Content-Length:361
+
+{
+    "DssProtocol": {
+        "Body": {
+            "Area": "Europe:Germany:Default",
+            "AuthCode": "REDACTED",
+            "LiveStatus": [
+                "0",
+                "0"
+            ],
+            "RewriteOemID": "General",
+            "SerialNumber": "REDACTED",
+            "StreamLevel": "0_3:1_1_0",
+            "StreamServerIPs": [
+                "0.0.0.0",
+                "0.0.0.0"
+            ]
+        },
+        "Header": {
+            "CSeq": "1",
+            "MessageType": "MSG_DEV_REGISTER_REQ",
+            "Version": "1.0"
+        }
+    }
+}
+HTTP/1.1 200 OK
+Content-Length: 287
+Content-Type: text/plain
+
+{
+   "DssProtocol" : {
+      "Body" : {
+         "KeepAliveIntervel" : "120"
+      },
+      "Header" : {
+         "CSeq" : "1",
+         "ErrorNum" : "200",
+         "ErrorString" : "Success OK",
+         "MessageType" : "MSG_DEV_REGISTER_RSP",
+         "Version" : "1.0"
+      }
+   }
+}
+```
+
+I.e., this seems to be some kind of cloud registry -- DSS could stand for
+Direct/Digital Streaming Service or something along the lines.
+
+Then there's two more TCP streams exchanged:
+
+```
+POST / HTTP/1.1
+CSeq: 1
+Host: 54.193.123.32
+Content-Length: 330
+
+{
+    "CfgProtocol": {
+        "Body": {
+            "AuthCode": "REDACTED",
+            "OemID": "General",
+            "OtherInfo": "V5.00.R02.00030678.10010.246701.00200",
+            "ProductID": "XM530_80X20_8M",
+            "SerialNumber": "REDACTED"
+        },
+        "Header": {
+            "CSeq": "1",
+            "MessageType": "MSG_PMS_CFG_QUERY_REQ",
+            "TerminalType": "Camera",
+            "Version": "1.0"
+        }
+    }
+}
+HTTP/1.1 200 OK
+Server: openresty/1.9.3.1
+Date: Sat, 01 Jun 2019 14:23:34 GMT
+Content-Type: text/html
+Connection: keep-alive
+content-length: 595
+
+{
+    "CfgProtocol": {
+        "Body": {
+            "Area": "Europe:Germany:Default",
+            "AuthCodeReTry": "1800",
+            "ErrReTry": "60",
+            "PushInterval": "10",
+            "PushMsg": "LocalAlarm|MotionDetect|LossDetect|ConsSensorAlarm|BlindDetect|IPCAlarm|LocalIO|StorageWriteError|StorageFailure|StorageLowSpace|StorageNotExist|SerialAlarm|VideoAnalyze|ConsSensorAlarm|HumanDetect|PIRAlarm",
+            "PushPicture": "0",
+            "RewriteOemDomainName": "52.58.71.125",
+            "RewriteOemDomainNamePicture": "159.138.23.80",
+            "SnapInterval": "3",
+            "SnapPicture": "0"
+        },
+        "Header": {
+            "CSeq": "1",
+            "ErrorNum": "200",
+            "ErrorString": "Success OK",
+            "MessageType": "MSG_PMS_CFG_QUERY_RSP",
+            "Version": "1.0"
+        }
+    }
+}
+```
+
+And finally:
+
+```
+POST /dev/upload HTTP/1.1
+Host: caps.xmcsrv.net
+Content-Length: 767
+
+{
+    "CapsCenter": {
+        "Body": {
+            "BuildTime": "2019-03-27 15:04:59",
+            "DevInfo": {
+                "CRC": 378,
+                "Data": "sruL3QR/r375nUOuC1WcsA==",
+                "DeviceType": 0,
+                "EncrptType": "ExAbility",
+                "Key": "78997780"
+            },
+            "EncryptChipInfo": {
+                "Base": 0,
+                "DssLevel": 0,
+                "EnBase": 0,
+                "ExtraLevel": 0,
+                "Intel": 0,
+                "IntelCPC": 0,
+                "IpcDeviceType": 0,
+                "Nat": 1,
+                "OEMID": 0,
+                "OEMProuct": 0,
+                "OEMSerial": 0,
+                "Resolution": 0,
+                "Version": "V1.0"
+            },
+            "HardWare": "XM530_80X20_8M",
+            "MacAddr": "RE:DA:CT:ED:XX",
+            "MfrsInfo": null,
+            "NewVersionSN": "REDACTED",
+            "OldVersionSN": "REDACTED",
+            "SerialNumber": "REDACTED",
+            "SoftExAbilityMask": 0,
+            "SoftWare": "V5.00.R02.00030678.10010.246701.00200"
+        },
+        "Header": {
+            "MessageType": "REPORT_CAPS_DEV_INFO_REQ"
+        }
+    }
+}
+HTTP/1.1 200 
+Server: nginx/1.12.2
+Date: Sat, 01 Jun 2019 14:23:35 GMT
+Content-Type: application/json;charset=UTF-8
+Transfer-Encoding: chunked
+Connection: keep-alive
+X-Application-Context: application:production
+
+d9
+{
+    "CapsCenter": {
+        "Body": {
+            "CRC": 378,
+            "Data": "sruL3QR/r375nUOuC1WcsA==",
+            "DeviceType": 0,
+            "EncrptType": "ExAbility",
+            "Key": "78997780"
+        },
+        "Header": {
+            "ErrorNum": 200,
+            "ErrorString": "Success",
+            "MessageType": "REPORT_CAPS_DEV_INFO_RSP"
+        }
+    }
+}
+0
+```
+
+Very curious. Especially the CRC-protected encrypted (?) data that it exchanges
+with the servers is a bit odd. If we can trust the metadata it just is
+reporting its capabilties to the server, which could well be true.
+
+In any case there's also numerous UDP datagrams that are sent which use a
+proprietary binary protocol. Transmitted information seems also to be the
+serial number, various IP addresses and the MAC address of the camera itself.
+
 ## Security
 Early on in the reverse engineering, it's clear that both on the web interface
 and the internal protocol on port 34567 do not transmit the passwords in plain
