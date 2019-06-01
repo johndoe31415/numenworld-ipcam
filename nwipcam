@@ -1,0 +1,189 @@
+#!/usr/bin/python3
+#	numenworld-ipcam - Reverse engineering of the NuMenWorld NCV-I536A IP camera
+#	Copyright (C) 2019-2019 Johannes Bauer
+#
+#	This file is part of numenworld-ipcam.
+#
+#	numenworld-ipcam is free software; you can redistribute it and/or modify
+#	it under the terms of the GNU General Public License as published by
+#	the Free Software Foundation; this program is ONLY licensed under
+#	version 3 of the License, later versions are explicitly excluded.
+#
+#	numenworld-ipcam is distributed in the hope that it will be useful,
+#	but WITHOUT ANY WARRANTY; without even the implied warranty of
+#	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#	GNU General Public License for more details.
+#
+#	You should have received a copy of the GNU General Public License
+#	along with numenworld-ipcam; if not, write to the Free Software
+#	Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+#
+#	Johannes Bauer <JohannesBauer@gmx.de>
+
+import collections
+import struct
+import socket
+import time
+import enum
+import json
+
+class XMEyeMsgCode(enum.IntEnum):
+	LoginCmd = 1000
+	LoginReply = LoginCmd + 1
+	KeepAliveCmd = 1006
+	KeepAliveReply = KeepAliveCmd + 1
+
+	GetGeneralDataCmd = 1042
+	GetGeneralDataReply = GetGeneralDataCmd + 1
+
+
+	GetSystemInfoCmd = 1020
+	GetSystemInfoReply = GetSystemInfoCmd + 1
+
+	SetCameraParamsCmd = 1040
+	SetCameraParamsReply = SetCameraParamsCmd + 1
+
+	ChannelTitleCmd = 1048
+	ChannelTitleReply = ChannelTitleCmd + 1
+
+	SystemFunctionCmd = 1360
+	SystemFunctionReply = SystemFunctionCmd + 1
+
+	OPTimeQueryCmd = 1452
+	OPTimeQueryReply = OPTimeQueryCmd + 1
+
+class XMEyeMessage():
+	_HeaderFields = collections.namedtuple("HeaderFields", [ "station", "session", "unknown", "msgcode", "length" ])
+	_HeaderStruct = struct.Struct("< L L 6s H L")
+
+	def __init__(self, station, session, msgcode, message):
+		if isinstance(message, (bytes, bytearray)):
+			self._message = bytes(message)
+		else:
+			self._message = json.dumps(message).encode("ascii")
+		self._header = self._HeaderFields(station = station, session = session, unknown = bytes(6), msgcode = msgcode, length = len(self._message))
+
+	@property
+	def header(self):
+		return self._header
+
+	@property
+	def message(self):
+		return self._message
+
+	@property
+	def payload(self):
+		msg = self.message.rstrip(bytes(1))
+		try:
+			data = json.loads(msg)
+		except json.JSONDecodeError:
+			return self.message
+		return data
+
+	@property
+	def length(self):
+		return len(self.message)
+
+	def __bytes__(self):
+		header = self._HeaderStruct.pack(*self._header)
+		return header + self._message
+
+	@classmethod
+	def deserialize(cls, msg):
+		header_data = msg[:20]
+		header = cls._HeaderFields(*cls._HeaderStruct.unpack(header_data))
+		payload = msg[20 : 20 + header.length ]
+		if len(payload) < header.length:
+			payload += bytes(header.length - len(payload))
+
+		try:
+			msgcode = XMEyeMsgCode(header.msgcode)
+		except ValueError:
+			msgcode = header.msgcode
+		return cls(station = header.station, session = header.session, msgcode = msgcode, message = payload)
+
+	@classmethod
+	def deserialize_all(cls, msg):
+		msg = bytearray(msg)
+		while len(msg) >= 20:
+			next_msg = cls.deserialize(msg)
+			yield next_msg
+			msg = msg[20 + next_msg.length : ]
+
+	def dump(self):
+		print("%s (%d bytes payload):" % (self._header.msgcode, self.length))
+		if isinstance(self.payload, bytes):
+			print(self.payload)
+		else:
+			print(json.dumps(self.payload, indent = 4, sort_keys = True))
+		print()
+
+	def __repr__(self):
+		return "Msg(%s): %s" % (self.header, str(self.payload))
+
+class XMEyeCamera():
+
+	def __init__(self, ip, port = 34567):
+		self._conn = socket.create_connection((ip, port))
+		self._session = None
+
+	def _tx_rx(self, command):
+		data = bytes(command)
+		self._conn.send(data)
+
+		response_header = self._conn.recv(20)
+		header = XMEyeMessage.deserialize(response_header)
+		payload_data = self._conn.recv(header.length)
+
+		response_data = response_header + payload_data
+		response = XMEyeMessage.deserialize(response_data)
+		return response
+
+	def login(self):
+		data = {
+			"EncryptType" : "MD5",
+			"LoginType" : "DVRIP-Web",
+			"PassWord": "tlJwpbo6",
+			"UserName" : "admin"
+		}
+		command = XMEyeMessage(station = 0xff, session = 0, msgcode = XMEyeMsgCode.LoginCmd, message = data)
+		response = self._tx_rx(command)
+		if int(response.payload["Ret"]) == 100:
+			# Login successful
+			self._session = int(response.payload["SessionID"], 16)
+		else:
+			raise Exception("Login failed:", response)
+
+	def _generic_cmd(self, name, msgcode):
+		data = {
+			"Name": name,
+			"SessionID": "0x%x" % (self._session),
+		}
+		command = XMEyeMessage(station = 0xff, session = self._session, msgcode = msgcode, message = data)
+		return self._tx_rx(command)
+
+	def get_systeminfo(self):
+		return self._generic_cmd("SystemInfo", XMEyeMsgCode.GetSystemInfoCmd)
+
+	def get_channel_title(self):
+		return self._generic_cmd("ChannelTitle", XMEyeMsgCode.ChannelTitleCmd)
+
+	def get_system_function(self):
+		return self._generic_cmd("SystemFunction", XMEyeMsgCode.SystemFunctionCmd)
+
+	def get_talk_audio_format(self):
+		return self._generic_cmd("TalkAudioFormat", XMEyeMsgCode.SystemFunctionCmd)
+
+
+with open("trace", "rb") as f:
+	data = f.read()
+	for msg in XMEyeMessage.deserialize_all(data):
+		msg.dump()
+
+
+cam = XMEyeCamera("192.168.1.10")
+cam.login()
+print(cam.get_systeminfo())
+print(cam.get_channel_title())
+print(cam.get_talk_audio_format())
+print(cam.get_system_function())
