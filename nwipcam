@@ -239,7 +239,7 @@ class XMEyeCamera():
 			packet_callback(rx_pkt)
 
 	def playback_stream(self):
-		mplayer_process = subprocess.Popen([ "mplayer", "-" ], stdin = subprocess.PIPE)
+		mplayer_process = subprocess.Popen([ "mplayer", "-demuxer", "h264es", "-" ], stdin = subprocess.PIPE)
 		def pkt_callback(pkt):
 			if (pkt.header.station == 511) and (pkt.header.msgcode == XMEyeMsgCode.VideoStreamData):
 				mplayer_process.stdin.raw.write(pkt.payload)
