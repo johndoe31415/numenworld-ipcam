@@ -26,6 +26,8 @@ import socket
 import time
 import enum
 import json
+import subprocess
+from HorrificallyBrokenPasswordFunction import HorrificallyBrokenPasswordFunction
 
 class XMEyeMsgCode(enum.IntEnum):
 	LoginCmd = 1000
@@ -49,8 +51,16 @@ class XMEyeMsgCode(enum.IntEnum):
 	SystemFunctionCmd = 1360
 	SystemFunctionReply = SystemFunctionCmd + 1
 
+	OPMonitorStartStopCmd = 1410
+	OPMonitorStartStopReply = OPMonitorStartStopCmd + 1
+
+	OPMonitorClaimCmd = 1413
+	OPMonitorClaimReply = OPMonitorClaimCmd + 1
+
 	OPTimeQueryCmd = 1452
 	OPTimeQueryReply = OPTimeQueryCmd + 1
+
+	VideoStreamData = 1412
 
 class XMEyeMessage():
 	_HeaderFields = collections.namedtuple("HeaderFields", [ "station", "session", "unknown", "msgcode", "length" ])
@@ -76,7 +86,7 @@ class XMEyeMessage():
 		msg = self.message.rstrip(bytes(1))
 		try:
 			data = json.loads(msg)
-		except json.JSONDecodeError:
+		except (json.JSONDecodeError, UnicodeError):
 			return self.message
 		return data
 
@@ -123,28 +133,55 @@ class XMEyeMessage():
 
 class XMEyeCamera():
 
-	def __init__(self, ip, port = 34567):
-		self._conn = socket.create_connection((ip, port))
+	def __init__(self, hostname, username = "admin", password = "", port = 34567):
+		self._hostname = hostname
+		self._conn = socket.create_connection((hostname, port))
 		self._session = None
+		self._username = username
+		self._password = password
 
-	def _tx_rx(self, command):
-		data = bytes(command)
-		self._conn.send(data)
+	@property
+	def derived_password(self):
+		return HorrificallyBrokenPasswordFunction.derive(self._password)
 
-		response_header = self._conn.recv(20)
+	@property
+	def rtsp_uri(self):
+		rtsp_port = 554
+		return "rtsp://%s:%d/user=%s&password=%s&channel=" % (self._hostname, rtsp_port, self._username, self.derived_password)
+
+	def _rx_bytes(self, length):
+		result = bytearray()
+		while len(result) < length:
+			remaining_bytes = length - len(result)
+			rx_data = self._conn.recv(remaining_bytes)
+			result += rx_data
+		return result
+
+	def _rx(self):
+		response_header = self._rx_bytes(20)
 		header = XMEyeMessage.deserialize(response_header)
-		payload_data = self._conn.recv(header.length)
+		payload_data = self._rx_bytes(header.length)
 
 		response_data = response_header + payload_data
 		response = XMEyeMessage.deserialize(response_data)
+#		print("<-", response)
 		return response
+
+	def _tx(self, command):
+		print("->", command)
+		data = bytes(command)
+		self._conn.send(data)
+
+	def _tx_rx(self, command):
+		self._tx(command)
+		return self._rx()
 
 	def login(self):
 		data = {
 			"EncryptType" : "MD5",
 			"LoginType" : "DVRIP-Web",
-			"PassWord": "tlJwpbo6",
-			"UserName" : "admin"
+			"UserName" : self._username,
+			"PassWord": self.derived_password,
 		}
 		command = XMEyeMessage(station = 0xff, session = 0, msgcode = XMEyeMsgCode.LoginCmd, message = data)
 		response = self._tx_rx(command)
@@ -174,16 +211,52 @@ class XMEyeCamera():
 	def get_talk_audio_format(self):
 		return self._generic_cmd("TalkAudioFormat", XMEyeMsgCode.SystemFunctionCmd)
 
+	def _opmonitor_cmd(self, action, msgcode, rx_msg = True):
+		data = {
+			"Name": "OPMonitor",
+			"OPMonitor": {
+				"Action":	action,
+				"Parameter": {
+					"Channel":	0,
+					"CombinMode": "CONNECT_ALL",
+					"StreamType": "Main",
+					"TransMode": "TCP",
+				},
+			},
+			"SessionID": "0x%x" % (self._session),
+		}
+		command = XMEyeMessage(station = 0xff, session = self._session, msgcode = msgcode, message = data)
+		if rx_msg:
+			return self._tx_rx(command)
+		else:
+			self._tx(command)
 
-with open("trace", "rb") as f:
-	data = f.read()
-	for msg in XMEyeMessage.deserialize_all(data):
-		msg.dump()
+	def get_stream(self, packet_callback):
+		self._opmonitor_cmd("Claim", XMEyeMsgCode.OPMonitorClaimCmd)
+		self._opmonitor_cmd("Start", XMEyeMsgCode.OPMonitorStartStopCmd, rx_msg = False)
+		while True:
+			rx_pkt = self._rx()
+			packet_callback(rx_pkt)
+
+	def playback_stream(self):
+		mplayer_process = subprocess.Popen([ "mplayer", "-" ], stdin = subprocess.PIPE)
+		def pkt_callback(pkt):
+			if (pkt.header.station == 511) and (pkt.header.msgcode == XMEyeMsgCode.VideoStreamData):
+				mplayer_process.stdin.raw.write(pkt.payload)
+			elif pkt.header.msgcode != XMEyeMsgCode.VideoStreamData:
+				print(pkt)
+		self.get_stream(pkt_callback)
+
+#with open("trace", "rb") as f:
+#	data = f.read()
+#	for msg in XMEyeMessage.deserialize_all(data):
+#		msg.dump()
 
 
-cam = XMEyeCamera("192.168.1.10")
+cam = XMEyeCamera("192.168.1.10", password = "abc")
 cam.login()
-print(cam.get_systeminfo())
-print(cam.get_channel_title())
-print(cam.get_talk_audio_format())
-print(cam.get_system_function())
+#print(cam.get_systeminfo())
+#print(cam.get_channel_title())
+#print(cam.get_talk_audio_format())
+#print(cam.get_system_function())
+cam.playback_stream()
