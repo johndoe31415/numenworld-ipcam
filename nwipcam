@@ -62,6 +62,27 @@ class XMEyeMsgCode(enum.IntEnum):
 
 	VideoStreamData = 1412
 
+class AudioVideoDataType(enum.IntEnum):
+	VideoIncomplete = 0xfc
+	VideoComplete = 0xfd
+	AudioComplete = 0xfa
+
+class AudioVideoPayload():
+	_HeaderFields = collections.namedtuple("HeaderFields", [ "unknown1", "channel", "datatype", "unknown2", "length" ])
+	_HeaderStruct = struct.Struct("< H B B H H")
+
+	def __init__(self, payload, hint = ""):
+		self._header = self._HeaderFields(*self._HeaderStruct.unpack(payload[:self._HeaderStruct.size]))
+		print("%20s [%5d]: %s %s" % (hint, len(payload), " ".join("%02x" % (c) for c in payload[:8]), str(self._header)))
+#		if len(payload) != (self._HeaderStruct.size + self._header.length):
+#			raise Exception("Unexpected AV payload, expected %d bytes but got %d." % (self._HeaderStruct.size + self._header.length, len(payload)))
+#		print(self._header)
+		self._data = payload[self._HeaderStruct.size : ]
+
+	@property
+	def data(self):
+		return self._data
+
 class XMEyeMessage():
 	_HeaderFields = collections.namedtuple("HeaderFields", [ "station", "session", "unknown", "msgcode", "length" ])
 	_HeaderStruct = struct.Struct("< L L 6s H L")
@@ -240,12 +261,19 @@ class XMEyeCamera():
 
 	def playback_stream(self):
 		mplayer_process = subprocess.Popen([ "mplayer", "-demuxer", "h264es", "-" ], stdin = subprocess.PIPE)
-		def pkt_callback(pkt):
-			if (pkt.header.station == 511) and (pkt.header.msgcode == XMEyeMsgCode.VideoStreamData):
-				mplayer_process.stdin.raw.write(pkt.payload)
-			elif pkt.header.msgcode != XMEyeMsgCode.VideoStreamData:
-				print(pkt)
-		self.get_stream(pkt_callback)
+		with open("audio.raw", "wb") as f, open("video.raw", "wb") as video_f:
+			def pkt_callback(pkt):
+				if (pkt.header.station == 511) and (pkt.header.msgcode == XMEyeMsgCode.VideoStreamData):
+					avpayload = AudioVideoPayload(pkt.payload, hint = "video")
+					mplayer_process.stdin.raw.write(pkt.payload)
+					video_f.write(pkt.payload)
+				elif pkt.header.msgcode == XMEyeMsgCode.VideoStreamData:
+					# Audio data?
+					avpayload = AudioVideoPayload(pkt.payload, hint = "audio")
+					f.write(avpayload.data)
+				elif pkt.header.msgcode != XMEyeMsgCode.VideoStreamData:
+					print(pkt)
+			self.get_stream(pkt_callback)
 
 #with open("trace", "rb") as f:
 #	data = f.read()
